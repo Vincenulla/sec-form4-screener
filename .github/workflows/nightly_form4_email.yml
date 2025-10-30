@@ -3,7 +3,7 @@ name: "SEC Form 4 Screener – Email + GitHub Pages"
 on:
   schedule:
     - cron: "0 20 * * *"   # 22h heure de Paris (20h UTC)
-  workflow_dispatch:       # Permet de le lancer manuellement depuis GitHub
+  workflow_dispatch:       # Permet de lancer manuellement
 
 jobs:
   run-screener:
@@ -25,7 +25,7 @@ jobs:
       - name: Run SEC Form 4 screener
         run: |
           mkdir -p reports
-          python sec_form4_screener_reportlab_summary.py --output reports/form4_report_$(date +%F).pdf --summary summary.txt || echo "⚠️ Pas de fichier résumé trouvé"
+          python sec_form4_screener_reportlab_summary.py
 
       - name: Read summary
         id: summary
@@ -53,8 +53,7 @@ jobs:
             ${{ steps.summary.outputs.text }}
 
             — Votre assistant de veille financière
-          attachments: |
-            reports/form4_report_*.pdf
+          attachments: reports/SEC_Form4_Report_*.pdf   # ⚠️ chemin exact du PDF généré
 
       - name: Generate HTML page
         run: |
