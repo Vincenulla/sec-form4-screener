@@ -46,6 +46,17 @@ for company, link, date_filed in form4_filings[:40]:  # limite à 40 pour la vit
     if link and is_buy_filing(link):
         buy_filings.append((company, link, date_filed))
 
+# ----------- 2b. Génération du résumé (summary.txt) -----------
+
+summary_path = "summary.txt"
+with open(summary_path, "w") as f:
+    if not buy_filings:
+        f.write("Aucun achat (Form 4) détecté aujourd'hui.")
+    else:
+        f.write("Top des achats détectés :\n\n")
+        for company, link, date_filed in buy_filings[:5]:
+            f.write(f"{company} – {date_filed}\nLien SEC : {link}\n\n")
+
 # ----------- 3. Génération du PDF -----------
 
 output_dir = "reports"
@@ -83,3 +94,4 @@ Story.append(Paragraph("Source : <a href='https://www.sec.gov/cgi-bin/browse-edg
 doc.build(Story)
 
 print(f"✅ Rapport PDF généré : {pdf_path}")
+print(f"✅ Résumé généré : {summary_path}")
