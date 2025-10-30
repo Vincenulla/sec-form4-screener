@@ -33,47 +33,53 @@ for row in rows:
 # ----------- 2. Filtrage simple des achats (buy) -----------
 
 def is_buy_filing(url):
-    """Retourne True si le Form 4 contient un achat (code 'P') dont le montant est > 100k$."""
+    """Retourne True si le Form 4 contient un achat (code 'P') supérieur à 100 000 $."""
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         text = r.text.lower()
 
-        # On détecte les transactions d'achat
+        # Vérifie qu'il s'agit bien d'un achat
         if "transactionacquireddisposedcode" not in text or ">p<" not in text:
             return False
 
-        # Recherche de lignes contenant le prix et la quantité
         soup = BeautifulSoup(r.text, "html.parser")
-        tables = soup.find_all("table")
+        rows = soup.find_all("tr")
 
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows:
-                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-                if len(cells) < 5:
+        for row in rows:
+            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            joined = " ".join(cells).lower()
+
+            # Ignore les lignes sans indication de prix ni quantité
+            if "p" not in joined or ("$" not in joined and "usd" not in joined):
+                continue
+
+            shares = None
+            price = None
+
+            for c in cells:
+                c_clean = c.replace(",", "").replace("$", "").strip()
+                try:
+                    # Si un nombre à virgule → probablement un prix
+                    if "." in c_clean and len(c_clean) <= 8:
+                        val = float(c_clean)
+                        if val < 10000:  # probabilité forte que ce soit un prix unitaire
+                            price = val
+                    # Si un grand nombre entier → probablement des actions
+                    elif c_clean.isdigit() and len(c_clean) >= 3:
+                        shares = float(c_clean)
+                except Exception:
                     continue
 
-                # On cherche les codes de transaction (P pour Purchase)
-                if "p" in cells[0].lower() or "p" in "".join(cells).lower():
-                    # Extraction approximative de quantité et prix
-                    try:
-                        shares = None
-                        price = None
-                        for c in cells:
-                            if "$" in c or "usd" in c.lower():
-                                price = float(c.replace("$", "").replace(",", "").split()[0])
-                            elif c.replace(",", "").isdigit():
-                                shares = float(c.replace(",", ""))
+            if shares and price:
+                total_value = shares * price
+                if total_value > 50000:
+                    print(f"💰 {url} → {total_value:,.0f} USD")
+                    return True
 
-                        if shares and price:
-                            total_value = shares * price
-                            if total_value > 50000:
-                                return True
-                    except Exception:
-                        continue
         return False
 
-    except Exception:
+    except Exception as e:
+        print(f"Erreur sur {url}: {e}")
         return False
 
 # ----------- 2b. Génération du résumé (summary.txt) -----------
