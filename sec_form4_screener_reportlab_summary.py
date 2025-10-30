@@ -33,18 +33,48 @@ for row in rows:
 # ----------- 2. Filtrage simple des achats (buy) -----------
 
 def is_buy_filing(url):
-    """Retourne True si le Form 4 contient une ligne d'achat (code 'P')."""
+    """Retourne True si le Form 4 contient un achat (code 'P') dont le montant est > 100k$."""
     try:
         r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
         text = r.text.lower()
-        return "transactionacquireddisposedcode" in text and ">p<" in text
-    except Exception:
+
+        # On détecte les transactions d'achat
+        if "transactionacquireddisposedcode" not in text or ">p<" not in text:
+            return False
+
+        # Recherche de lignes contenant le prix et la quantité
+        soup = BeautifulSoup(r.text, "html.parser")
+        tables = soup.find_all("table")
+
+        for table in tables:
+            rows = table.find_all("tr")
+            for row in rows:
+                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+                if len(cells) < 5:
+                    continue
+
+                # On cherche les codes de transaction (P pour Purchase)
+                if "p" in cells[0].lower() or "p" in "".join(cells).lower():
+                    # Extraction approximative de quantité et prix
+                    try:
+                        shares = None
+                        price = None
+                        for c in cells:
+                            if "$" in c or "usd" in c.lower():
+                                price = float(c.replace("$", "").replace(",", "").split()[0])
+                            elif c.replace(",", "").isdigit():
+                                shares = float(c.replace(",", ""))
+
+                        if shares and price:
+                            total_value = shares * price
+                            if total_value > 50000:
+                                return True
+                    except Exception:
+                        continue
         return False
 
-buy_filings = []
-for company, link, date_filed in form4_filings[:40]:  # limite à 40 pour la vitesse
-    if link and is_buy_filing(link):
-        buy_filings.append((company, link, date_filed))
+    except Exception:
+        return False
 
 # ----------- 2b. Génération du résumé (summary.txt) -----------
 
