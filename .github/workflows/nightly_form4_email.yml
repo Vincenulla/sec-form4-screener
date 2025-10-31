@@ -22,9 +22,8 @@ jobs:
         run: |
           pip install requests reportlab
 
-      - name: Run SEC Form 4 screener
-        run: |
-          python sec_form4_screener_reportlab_summary.py
+      - name: Run SEC Form 4 Screener
+        run: python sec_form4_screener_reportlab_summary.py
 
       - name: Send PDF report by email
         uses: dawidd6/action-send-mail@v3
