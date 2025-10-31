@@ -6,13 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  nightly:
     runs-on: ubuntu-latest
 
     steps:
+      # 1️⃣ Cloner le dépôt
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Vérifier le répertoire courant
+      - name: Show current directory
+        run: pwd
+
+      - name: List repo files
+        run: ls -l
+
+      # 3️⃣ Installer Python et dépendances
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -22,9 +31,11 @@ jobs:
         run: |
           pip install requests reportlab
 
+      # 4️⃣ Exécuter le script Python depuis la racine
       - name: Run SEC Form 4 Screener
-        run: python sec_form4_screener_reportlab_summary.py
+        run: python ./sec_form4_screener_reportlab_summary.py
 
+      # 5️⃣ Envoyer l'e-mail avec PDF + résumé
       - name: Send PDF report by email
         uses: dawidd6/action-send-mail@v3
         with:
