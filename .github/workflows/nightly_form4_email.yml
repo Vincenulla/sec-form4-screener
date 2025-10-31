@@ -1,13 +1,14 @@
-name: "SEC Form 4 Screener – Email + GitHub Pages"
+name: SEC Form 4 Screener – Email + GitHub Pages
 
 on:
   schedule:
-    - cron: "0 20 * * *"   # 22h heure de Paris (20h UTC)
-  workflow_dispatch:       # Permet de lancer manuellement
+    - cron: "0 22 * * *"  # tous les jours à 22h UTC
+  workflow_dispatch:
 
 jobs:
-  run-screener:
+  build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -15,45 +16,29 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 reportlab
+          pip install requests reportlab
 
       - name: Run SEC Form 4 screener
         run: |
-          mkdir -p reports
-          python sec_form4_screener_reportlab_summary.py
-
-      - name: Read summary
-        id: summary
-        run: |
-          echo "text<<EOF" >> $GITHUB_OUTPUT
-          cat summary.txt || echo "Aucun résumé généré." >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          python .github/workflows/sec_form4_screener_reportlab_summary.py
 
       - name: Send PDF report by email
-  uses: dawidd6/action-send-mail@v3
-  with:
-    server_address: smtp.gmail.com
-    server_port: 465
-    username: ${{ secrets.EMAIL_USERNAME }}
-    password: ${{ secrets.EMAIL_PASSWORD }}
-    subject: "📈 Rapport quotidien Form 4 – Achats > 100k$"
-    to: ${{ secrets.EMAIL_TO }}
-    from: "SEC Screener <${{ secrets.EMAIL_USERNAME }}>"
-    body: ${{ steps.generate.outputs.email_body }}
-    attachments: Form4_Report.pdf, email_summary.txt
-
-      - name: Generate HTML page
-        run: |
-          python publish_html.py
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+        uses: dawidd6/action-send-mail@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: public
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: "📈 Rapport quotidien Form 4 – Achats > 100k$"
+          to: ${{ secrets.EMAIL_TO }}
+          from: "SEC Screener <${{ secrets.EMAIL_USERNAME }}>"
+          body: |
+            Voici le résumé des achats insiders du jour (>100k$).
+            Le rapport PDF détaillé est joint.
+            ---
+            $(cat email_summary.txt)
+          attachments: Form4_Report.pdf, email_summary.txt
