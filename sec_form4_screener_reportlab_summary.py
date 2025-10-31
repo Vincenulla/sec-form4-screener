@@ -1,68 +1,82 @@
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.units import cm
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
 import os
 
 # --- Configuration ---
-SEC_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4"
+API_URL = "https://efts.sec.gov/LATEST/search-index"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/1.0; +https://github.com/Vincenulla/sec-form4-screener)"
+    "User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/2.0; +https://github.com/Vincenulla/sec-form4-screener)"
 }
-MIN_BUY_VALUE = 100_000  # Filtrer les achats > 100k$
+MIN_BUY_VALUE = 100_000
 PDF_FILE = "Form4_Report.pdf"
 SUMMARY_FILE = "email_summary.txt"
 
 
-# --- Fonction pour récupérer les Form 4 récents ---
+# --- Fonction : récupérer les filings via EDGAR Next ---
 def fetch_form4_filings():
-    print("Fetching current Form 4 filings...")
+    print("Fetching current Form 4 filings via EDGAR Next API...")
+    params = {
+        "q": "formType:\"4\"",
+        "from": "0",
+        "size": "100",
+        "sort": "filedAt:desc"
+    }
     try:
-        response = requests.get(SEC_URL, headers=HEADERS, timeout=20)
-        if response.status_code == 403:
-            print("⚠️  SEC refused connection (403 Forbidden). Using empty dataset.")
+        r = requests.get(API_URL, headers=HEADERS, params=params, timeout=20)
+        if r.status_code == 403:
+            print("⚠️ SEC 403 – access forbidden.")
             return []
-        response.raise_for_status()
+        r.raise_for_status()
+        data = r.json()
+        filings = []
+        for item in data.get("hits", {}).get("hits", []):
+            src = item["_source"]
+            accession = src.get("accessionNo", "")
+            company = src.get("displayNames", [""])[0]
+            filed_at = src.get("filedAt", "")[:10]
+            link = f"https://www.sec.gov/ix?doc=/Archives/edgar/data/{src.get('ciks', [''])[0]}/{accession.replace('-', '')}/{accession}-index.html"
+            filings.append({"company": company, "link": link, "date": filed_at})
+        return filings
     except Exception as e:
-        print(f"⚠️  Network or access error: {e}")
+        print(f"⚠️ Error fetching EDGAR Next: {e}")
         return []
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    filings = []
-    rows = soup.find_all("tr")
 
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) < 4:
-            continue
+# --- Fonction fallback : ancienne page (HTML) ---
+def fetch_form4_legacy():
+    from bs4 import BeautifulSoup
+    print("Fallback: fetching via legacy HTML page...")
+    try:
+        r = requests.get("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4", headers=HEADERS, timeout=20)
+        if r.status_code != 200:
+            return []
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.find_all("tr")
+        filings = []
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) < 4:
+                continue
+            filing_type = cols[0].text.strip()
+            company = cols[1].text.strip()
+            link_tag = cols[1].find("a")
+            link = "https://www.sec.gov" + link_tag["href"] if link_tag else ""
+            date_filed = cols[3].text.strip()
+            if filing_type == "4":
+                filings.append({"company": company, "link": link, "date": date_filed})
+        return filings
+    except Exception as e:
+        print(f"⚠️ Legacy fetch failed: {e}")
+        return []
 
-        filing_type = cols[0].text.strip()
-        company = cols[1].text.strip()
-        link_tag = cols[1].find("a")
-        link = "https://www.sec.gov" + link_tag["href"] if link_tag else ""
-        date_filed = cols[3].text.strip()
 
-        if filing_type == "4":
-            filings.append({"company": company, "link": link, "date": date_filed})
-    return filings
-
-
-# --- Fonction d’analyse simplifiée pour filtrer les achats ---
-def is_buy_filing(filing):
-    # On tente d’estimer la taille de la transaction
-    # (dans une version complète on parserait le XML)
-    text = filing["company"].lower()
-    if "purchase" in text or "acquisition" in text:
-        return True
-    return True  # temporairement on garde tout pour la démo
-
-
-# --- Générer le PDF avec liens cliquables ---
+# --- Génération du PDF ---
 def generate_pdf(filings):
     print("Generating PDF report...")
     doc = SimpleDocTemplate(PDF_FILE, pagesize=A4)
@@ -108,14 +122,14 @@ def generate_pdf(filings):
     print(f"✅ PDF generated: {PDF_FILE}")
 
 
-# --- Générer le résumé texte ---
+# --- Génération du résumé texte ---
 def generate_summary(filings):
     print("Generating summary for email...")
     with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
         if not filings:
             f.write("Aucun achat insider supérieur à 100 000 $ n’a été détecté aujourd’hui.\n")
         else:
-            f.write("Achats insiders supérieurs à 100 000 $ :\n\n")
+            f.write("Achats insiders récents (>100k$) :\n\n")
             for filing in filings:
                 f.write(f"- {filing['company']} ({filing['date']}) → {filing['link']}\n")
 
@@ -124,13 +138,14 @@ def generate_summary(filings):
 if __name__ == "__main__":
     filings = fetch_form4_filings()
     if not filings:
-        print("⚠️  Aucun résultat récupéré depuis la SEC.")
+        filings = fetch_form4_legacy()
+
+    if not filings:
+        print("⚠️  Aucun résultat trouvé, création d’un rapport vide.")
         generate_pdf([])
         generate_summary([])
     else:
-        # filtrer les achats > 100k (placeholder)
-        buy_filings = [f for f in filings if is_buy_filing(f)]
-        generate_pdf(buy_filings)
-        generate_summary(buy_filings)
+        generate_pdf(filings)
+        generate_summary(filings)
 
-    print("Done.")
+    print("✅ Done.")
