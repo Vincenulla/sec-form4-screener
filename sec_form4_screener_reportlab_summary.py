@@ -1,150 +1,128 @@
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib import colors
+import re
 import os
+from datetime import datetime, timedelta
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
 
-# ----------- 1. Récupération des filings "Form 4" -----------
+# ---------- CONFIG ----------
+OUTPUT_FILE = "Form4_Report.pdf"
+MIN_PURCHASE_USD = 100_000
+USER_AGENT = {"User-Agent": "Form4Screener/1.0 (contact: your_email@example.com)"}
+SUMMARY_FILE = "email_summary.txt"
+# ----------------------------
 
-def get_recent_filings():
-    URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent"
-    r = requests.get(URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    soup = BeautifulSoup(r.text, "html.parser")
+def download_daily_index():
+    """Télécharge l'index journalier le plus récent disponible"""
+    today = datetime.utcnow()
+    for i in range(3):  # essaie les 3 derniers jours
+        date = today - timedelta(days=i)
+        year, qtr = date.year, (date.month - 1)//3 + 1
+        url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{qtr}/company.{date.strftime('%Y%m%d')}.idx"
+        print(f"Tentative : {url}")
+        resp = requests.get(url, headers=USER_AGENT)
+        if resp.status_code == 200:
+            print("Index trouvé :", url)
+            return resp.text
+    raise RuntimeError("Impossible de récupérer l'index SEC des 3 derniers jours.")
 
-    rows = soup.find_all("tr")
-    filings = []
+def extract_form4_lines(index_text):
+    """Extrait les lignes Form 4 depuis le texte brut"""
+    lines = []
+    capture = False
+    for line in index_text.splitlines():
+        if "-----" in line:
+            capture = True
+            continue
+        if capture and re.search(r"\b4\b", line):
+            lines.append(line)
+    return lines
 
-    for row in rows:
-        cols = row.find_all("td")
-        if len(cols) >= 4:
-            form = cols[3].text.strip()
-            if form == "4":
-                company = cols[0].text.strip()
-                link = cols[1].find("a")
-                if link:
-                    href = "https://www.sec.gov" + link.get("href")
-                else:
-                    href = ""
-                date_filed = cols[4].text.strip() if len(cols) > 4 else ""
-                filings.append((company, href, date_filed))
-    return filings
-
-# ----------- 2. Vérification achat > 100k$ -----------
-
-def is_buy_filing(url):
-    """Retourne True si le Form 4 contient un achat > 100 000 $"""
+def parse_index_line(line):
+    """Parse une ligne d'index"""
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        text = r.text.lower()
-        if "transactionacquireddisposedcode" not in text or ">p<" not in text:
-            return False
+        parts = re.split(r"\s{2,}", line.strip())
+        company = parts[0]
+        form_type = parts[1]
+        cik = parts[2]
+        filename = parts[-1]
+        filing_url = f"https://www.sec.gov/Archives/{filename}"
+        return {"company": company, "cik": cik, "url": filing_url}
+    except Exception:
+        return None
 
-        soup = BeautifulSoup(r.text, "html.parser")
-        rows = soup.find_all("tr")
-
-        for row in rows:
-            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            joined = " ".join(cells).lower()
-
-            if "p" not in joined or ("$" not in joined and "usd" not in joined):
-                continue
-
-            shares = None
-            price = None
-            for c in cells:
-                c_clean = c.replace(",", "").replace("$", "").strip()
-                try:
-                    if "." in c_clean and len(c_clean) <= 8:
-                        val = float(c_clean)
-                        if val < 10000:
-                            price = val
-                    elif c_clean.isdigit() and len(c_clean) >= 3:
-                        shares = float(c_clean)
-                except:
-                    continue
-
-            if shares and price:
-                total_value = shares * price
-                if total_value > 100000:
-                    print(f"💰 {url} → {total_value:,.0f} USD")
-                    return True
-
+def extract_buy_transactions(filing_text):
+    """Analyse simple du contenu pour détecter des achats > seuil"""
+    text = filing_text.lower()
+    if "acquisition" not in text and "purchase" not in text:
         return False
-
-    except Exception as e:
-        print(f"Erreur sur {url}: {e}")
-        return False
-
-# ----------- 3. Génération du PDF -----------
+    matches = re.findall(r"\$?([\d,]+)", text)
+    for m in matches:
+        try:
+            val = float(m.replace(",", ""))
+            if val >= MIN_PURCHASE_USD:
+                return True
+        except:
+            pass
+    return False
 
 def generate_pdf(buy_filings):
-    output_dir = "reports"
-    os.makedirs(output_dir, exist_ok=True)
-    today = datetime.now().strftime("%Y-%m-%d")
-    pdf_path = os.path.join(output_dir, f"SEC_Form4_Report_{today}.pdf")
-
-    doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+    """Crée le rapport PDF"""
+    doc = SimpleDocTemplate(OUTPUT_FILE, pagesize=letter)
     styles = getSampleStyleSheet()
-    Story = []
-
-    Story.append(Paragraph(f"Rapport quotidien des achats (Form 4) – {today}", styles["Title"]))
-    Story.append(Spacer(1, 12))
+    story = [Paragraph("📈 SEC Form 4 Insider Buys > 100k$", styles["Title"]), Spacer(1, 0.2*inch)]
+    story.append(Paragraph(f"Date du rapport : {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", styles["Normal"]))
+    story.append(Spacer(1, 0.3*inch))
 
     if not buy_filings:
-        Story.append(Paragraph("Aucun achat > 100 000 $ détecté aujourd’hui.", styles["Normal"]))
+        story.append(Paragraph("Aucun achat significatif trouvé aujourd'hui.", styles["Normal"]))
     else:
-        data = [["Entreprise", "Date", "Lien SEC"]]
-        for company, link, date_filed in buy_filings:
-            data.append([company, date_filed, link])
+        for f in buy_filings:
+            story.append(Paragraph(f"<b>{f['company']}</b> (CIK {f['cik']})", styles["Heading3"]))
+            story.append(Paragraph(f"<a href='{f['url']}'>{f['url']}</a>", styles["Normal"]))
+            story.append(Spacer(1, 0.2*inch))
 
-        table = Table(data, colWidths=[200, 80, 250])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.lightblue),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ]))
-        Story.append(table)
+    doc.build(story)
+    print(f"✅ Rapport PDF généré : {OUTPUT_FILE}")
 
-    Story.append(Spacer(1, 12))
-    Story.append(Paragraph(
-        "Source : <a href='https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent'>SEC – Current Filings</a>",
-        styles["Normal"]
-    ))
+def write_summary(buy_filings):
+    """Crée un résumé texte pour le corps de l'email"""
+    lines = []
+    lines.append("📊 Résumé du jour : Achats Form 4 > 100k$")
+    lines.append(f"Date du rapport : {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("----------------------------------------------------")
+    if not buy_filings:
+        lines.append("Aucun achat insider significatif trouvé aujourd'hui.")
+    else:
+        for f in buy_filings:
+            lines.append(f"- {f['company']} (CIK {f['cik']}) → {f['url']}")
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print("📝 Résumé email généré :", SUMMARY_FILE)
 
-    doc.build(Story)
-    return pdf_path
+def main():
+    print("Téléchargement de l'index journalier SEC...")
+    index_text = download_daily_index()
+    lines = extract_form4_lines(index_text)
+    print(f"{len(lines)} Form 4 trouvés dans l'index.")
 
-# ----------- 4. Génération du résumé -----------
+    filings = []
+    for line in lines[:50]:
+        info = parse_index_line(line)
+        if not info:
+            continue
+        try:
+            filing_resp = requests.get(info["url"], headers=USER_AGENT)
+            if filing_resp.status_code == 200 and extract_buy_transactions(filing_resp.text):
+                filings.append(info)
+        except Exception as e:
+            print(f"Erreur {info['company']}: {e}")
 
-def generate_summary(buy_filings):
-    summary_path = "summary.txt"
-    with open(summary_path, "w") as f:
-        if not buy_filings:
-            f.write("Aucun achat > 100 000 $ détecté aujourd'hui.")
-        else:
-            f.write("Top des achats détectés :\n\n")
-            for company, link, date_filed in buy_filings[:5]:
-                f.write(f"{company} – {date_filed}\nLien SEC : {link}\n\n")
-    return summary_path
-
-# ----------- 5. Partie principale -----------
+    print(f"{len(filings)} achats significatifs trouvés.")
+    generate_pdf(filings)
+    write_summary(filings)
 
 if __name__ == "__main__":
-    print("🔍 Récupération des filings récents…")
-    filings = get_recent_filings()
-
-    buy_filings = []
-    for company, link, date_filed in filings[:40]:  # limite 40 pour vitesse
-        if link and is_buy_filing(link):
-            buy_filings.append((company, link, date_filed))
-
-    pdf_path = generate_pdf(buy_filings)
-    summary_path = generate_summary(buy_filings)
-
-    print(f"✅ Rapport PDF généré : {pdf_path}")
-    print(f"✅ Résumé généré : {summary_path}")
+    main()
