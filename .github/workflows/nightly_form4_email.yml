@@ -2,26 +2,17 @@ name: SEC Form 4 Screener – Email + GitHub Pages
 
 on:
   schedule:
-    - cron: "0 22 * * *"  # tous les jours à 22h UTC
-  workflow_dispatch:
+    - cron: "0 22 * * *"  # exécution tous les jours à 22h UTC
+  workflow_dispatch:      # permet de lancer manuellement depuis GitHub
 
 jobs:
-  nightly:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Cloner le dépôt
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Vérifier le répertoire courant
-      - name: Show current directory
-        run: pwd
-
-      - name: List repo files
-        run: ls -l
-
-      # 3️⃣ Installer Python et dépendances
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -29,26 +20,33 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests reportlab
+          pip install requests reportlab beautifulsoup4
 
-      # 4️⃣ Exécuter le script Python depuis la racine
-      - name: Run SEC Form 4 Screener
+      - name: Run screener script
         run: python ./sec_form4_screener_reportlab_summary.py
 
-      # 5️⃣ Envoyer l'e-mail avec PDF + résumé
+      - name: Upload generated report as artifact (for debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Form4_Report
+          path: |
+            Form4_Report.pdf
+            email_summary.txt
+
       - name: Send PDF report by email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_PASS }}
           subject: "📈 Rapport quotidien Form 4 – Achats > 100k$"
+          from: "SEC Screener <${{ secrets.EMAIL_USER }}>"
           to: ${{ secrets.EMAIL_TO }}
-          from: "SEC Screener <${{ secrets.EMAIL_USERNAME }}>"
           body: |
             Voici le résumé des achats insiders du jour (>100k$).
             Le rapport PDF détaillé est joint.
+
             ---
             $(cat email_summary.txt)
           attachments: Form4_Report.pdf, email_summary.txt
