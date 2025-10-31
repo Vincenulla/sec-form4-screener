@@ -35,25 +35,17 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Send PDF report by email
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USER }}
-          password: ${{ secrets.SMTP_PASS }}
-          subject: "📊 Form 4 – Rapport du $(date +'%d %B %Y')"
-          to: ${{ secrets.MAIL_TO }}
-          from: "Insider Screener <${{ secrets.SMTP_USER }}>"
-          body: |
-            Bonjour 👋,
-
-            Voici le rapport quotidien des achats d’initiés (Form 4 SEC) généré automatiquement à 22h.
-
-            Résumé du jour :
-            ${{ steps.summary.outputs.text }}
-
-            — Votre assistant de veille financière
-          attachments: reports/SEC_Form4_Report_*.pdf   # ⚠️ chemin exact du PDF généré
+  uses: dawidd6/action-send-mail@v3
+  with:
+    server_address: smtp.gmail.com
+    server_port: 465
+    username: ${{ secrets.EMAIL_USERNAME }}
+    password: ${{ secrets.EMAIL_PASSWORD }}
+    subject: "📈 Rapport quotidien Form 4 – Achats > 100k$"
+    to: ${{ secrets.EMAIL_TO }}
+    from: "SEC Screener <${{ secrets.EMAIL_USERNAME }}>"
+    body: ${{ steps.generate.outputs.email_body }}
+    attachments: Form4_Report.pdf, email_summary.txt
 
       - name: Generate HTML page
         run: |
