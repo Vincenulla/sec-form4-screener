@@ -20,7 +20,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests reportlab beautifulsoup4
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml reportlab
 
       - name: Run screener script
         run: python ./sec_form4_screener_reportlab_summary.py
