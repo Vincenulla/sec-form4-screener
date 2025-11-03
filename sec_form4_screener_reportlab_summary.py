@@ -12,10 +12,11 @@ PDF_FILE = "Form4_Report.pdf"
 SUMMARY_FILE = "email_summary.txt"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/1.1; +mailto:vincent.form4bot@gmail.com)",
+    "User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/1.2; +mailto:vincent.form4bot@gmail.com)",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://www.sec.gov/"
 }
+
 
 def fetch_form4_filings():
     """Récupère la liste des Form 4 récents via le flux RSS EDGAR."""
@@ -29,43 +30,70 @@ def fetch_form4_filings():
         filings = []
         for e in entries:
             title = e.find("title").text.strip()
-            link = e.find("link")["href"]
+            link_html = e.find("link")["href"]
             updated = e.find("updated").text[:10]
             if "Form 4" not in title:
                 continue
-            filings.append({"company": title, "link": link, "date": updated})
+            filings.append({"title": title, "link_html": link_html, "date": updated})
         print(f"✅ {len(filings)} filings trouvés via RSS.")
         return filings
     except Exception as e:
         print("❌ Error fetching RSS:", e)
         return []
 
+
 def parse_form4_details(filing):
-    """Ouvre le XML associé à un Form 4 et extrait le total des achats."""
+    """Analyse le fichier XML d’un Form 4 pour extraire insider, société et montant acheté."""
     try:
-        # Le lien RSS pointe sur la page HTML — on reconstruit le lien XML
-        link_xml = filing["link"].replace("-index.htm", ".xml")
-        r = requests.get(link_xml, headers=HEADERS, timeout=30)
+        xml_url = filing["link_html"].replace("-index.htm", ".xml")
+        r = requests.get(xml_url, headers=HEADERS, timeout=30)
         if r.status_code != 200:
             return None
         xml = BeautifulSoup(r.text, "xml")
 
+        # Nom de la société et de l’insider
+        issuer_name = xml.find("issuerName").text.strip() if xml.find("issuerName") else "Unknown"
+        insider_name = xml.find("rptOwnerName").text.strip() if xml.find("rptOwnerName") else "Unknown"
+
         total_value = 0
         for trans in xml.find_all("nonDerivativeTransaction"):
-            code = trans.transactionCoding.transactionCode.text if trans.transactionCoding.transactionCode else ""
-            if code != "P":  # 'P' = Purchase
+            try:
+                code = trans.transactionCoding.transactionCode.text.strip()
+                if code != "P":  # 'P' = Purchase
+                    continue
+
+                # Valeur de la transaction
+                val_node = trans.find("transactionValue")
+                if val_node and val_node.text.replace(".", "", 1).isdigit():
+                    total_value += float(val_node.text)
+                else:
+                    # Si valeur manquante, reconstituer = shares × price
+                    shares = trans.find("transactionShares")
+                    price = trans.find("transactionPricePerShare")
+                    if shares and price:
+                        try:
+                            s = float(shares.text.replace(",", ""))
+                            p = float(price.text.replace(",", ""))
+                            total_value += s * p
+                        except:
+                            pass
+            except Exception:
                 continue
-            val_node = trans.transactionAmounts.transactionValue
-            if val_node and val_node.text.replace('.', '', 1).isdigit():
-                total_value += float(val_node.text)
 
         if total_value >= 100000:
-            return {"company": filing["company"], "link": filing["link"], "date": filing["date"], "value": total_value}
-        else:
-            return None
-    except Exception as e:
-        print(f"⚠️ Erreur parsing {filing['company']}: {e}")
+            return {
+                "issuer": issuer_name,
+                "insider": insider_name,
+                "date": filing["date"],
+                "value": total_value,
+                "link_html": filing["link_html"],
+            }
         return None
+
+    except Exception as e:
+        print(f"⚠️ Erreur parsing {filing['title']}: {e}")
+        return None
+
 
 def generate_pdf(filings):
     print("Generating PDF report...")
@@ -81,24 +109,27 @@ def generate_pdf(filings):
         doc.build(story)
         return
 
-    data = [["Entreprise", "Date", "Montant ($)", "Lien SEC"]]
+    data = [["Société", "Insider", "Date", "Montant ($)", "Lien SEC"]]
     for f in filings:
-        link_html = f"<a href='{f['link']}' color='blue'>{f['link']}</a>"
+        link_html = f"<a href='{f['link_html']}' color='blue'>{f['link_html']}</a>"
         data.append([
-            f["company"],
+            f["issuer"],
+            f["insider"],
             f["date"],
             f"{f['value']:,.0f}",
             Paragraph(link_html, styles["Normal"]),
         ])
 
-    table = Table(data, colWidths=[7*cm, 2.5*cm, 3*cm, 6*cm])
+    table = Table(data, colWidths=[5*cm, 4*cm, 2.5*cm, 3*cm, 5*cm])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
         ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP")
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
     ]))
     story.append(table)
     doc.build(story)
+
 
 def generate_summary(filings):
     with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
@@ -106,7 +137,9 @@ def generate_summary(filings):
             f.write("Aucun achat insider > 100 000 $ détecté aujourd’hui.\n")
         else:
             for fl in filings:
-                f.write(f"- {fl['company']} ({fl['date']}) : ${fl['value']:,.0f} → {fl['link']}\n")
+                f.write(f"- {fl['issuer']} | {fl['insider']} ({fl['date']}) : "
+                        f"${fl['value']:,.0f} → {fl['link_html']}\n")
+
 
 if __name__ == "__main__":
     filings = fetch_form4_filings()
