@@ -6,12 +6,10 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
-from reportlab.lib.colors import blue
 from bs4 import BeautifulSoup
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/1.0; contact@example.com)"}
 EDGAR_NEXT_URL = "https://efts.sec.gov/LATEST/search-index"
-TODAY = datetime.date.today()
 
 def fetch_form4_filings():
     print("Fetching Form 4 filings via EDGAR Next...")
@@ -35,10 +33,10 @@ def parse_form4_xml(url):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code == 404 and url.endswith(".xml"):
-            url = url.replace(".xml", ".txt")  # fallback .txt
+            url = url.replace(".xml", ".txt")
             resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code == 404 and url.endswith(".txt"):
-            url = url.replace(".txt", ".htm")  # fallback .htm
+            url = url.replace(".txt", ".htm")
             resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code != 200:
             print(f"Could not fetch filing at {url}, status {resp.status_code}")
@@ -75,14 +73,22 @@ def main():
 
     matches = []
     for f in filings:
-        base_url = f"https://www.sec.gov/Archives/{f['linkToFilingDetails'].split('/Archives/')[-1]}"
-        xml_url = base_url.replace("-index.htm", ".xml")
-        parsed = parse_form4_xml(xml_url)
-        if parsed and parsed["type"] == "P" and parsed["amount"] > 100000:
-            matches.append(parsed)
+        try:
+            if "linkToHtml" not in f:
+                continue
+            html_link = f["linkToHtml"]
+            if not html_link.startswith("https://www.sec.gov"):
+                html_link = "https://www.sec.gov" + html_link
+            xml_url = html_link.replace("-index.htm", ".xml")
+            parsed = parse_form4_xml(xml_url)
+            if parsed and parsed["type"] == "P" and parsed["amount"] > 100000:
+                matches.append(parsed)
+        except Exception as e:
+            print(f"Skipping malformed filing: {e}")
 
     print(f"Matches found: {len(matches)}")
 
+    # --- Generate PDF ---
     doc = SimpleDocTemplate("Form4_Report.pdf", pagesize=letter)
     styles = getSampleStyleSheet()
     Story = [Paragraph("📈 Form 4 – Achats insiders > 100 000 $", styles["Title"]), Spacer(1, 0.25 * inch)]
@@ -91,12 +97,17 @@ def main():
         Story.append(Paragraph("Aucun achat insider > 100 000 $ trouvé aujourd'hui.", styles["Normal"]))
     else:
         for m in matches:
-            ptext = f"<b>{m['issuer']}</b> — {m['insider']}<br/>Achat: ${m['amount']:,.0f}<br/><a href='{m['link']}' color='blue'>Lien vers le Form 4</a>"
+            ptext = (
+                f"<b>{m['issuer']}</b> — {m['insider']}<br/>"
+                f"Achat: ${m['amount']:,.0f}<br/>"
+                f"<a href='{m['link']}'>Lien vers le Form 4</a>"
+            )
             Story.append(Paragraph(ptext, styles["Normal"]))
             Story.append(Spacer(1, 0.2 * inch))
 
     doc.build(Story)
 
+    # --- Write summary for email ---
     with open("email_summary.txt", "w") as f:
         if matches:
             for m in matches:
