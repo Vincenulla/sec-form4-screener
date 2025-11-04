@@ -1,121 +1,123 @@
 import requests
-import datetime
 import xml.etree.ElementTree as ET
-from io import BytesIO
+from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
-from bs4 import BeautifulSoup
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+import os
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SECForm4Screener/1.0; contact@example.com)"}
-EDGAR_NEXT_URL = "https://efts.sec.gov/LATEST/search-index"
+# ⚠️ Mets ici ton adresse e-mail (obligatoire pour les requêtes SEC)
+USER_AGENT = "Form4Screener/1.0 (ton.email@exemple.com)"
+HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
-def fetch_form4_filings():
-    print("Fetching Form 4 filings via EDGAR Next...")
-    params = {
-        "keys": 'formType:"4"',
-        "category": "custom",
-        "forms": "4",
-        "start": 0,
-        "count": 50,
-        "sortField": "filedAt",
-        "sortOrder": "desc"
-    }
-    r = requests.get(EDGAR_NEXT_URL, headers=HEADERS, params=params)
-    if r.status_code != 200:
-        print(f"⚠️ EDGAR Next error {r.status_code}, fallback...")
-        return []
+def fetch_form4_filings(limit=50):
+    """Récupère les derniers dépôts Form 4 via l’API EDGAR Next."""
+    print("🔎 Fetching recent Form 4 filings from SEC EDGAR Next…")
+    url = (
+        "https://efts.sec.gov/LATEST/search-index"
+        f"?keys=formType%3A%224%22&category=custom&forms=4"
+        f"&start=0&count={limit}&sortField=filedAt&sortOrder=desc"
+    )
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
     data = r.json()
-    return data.get("hits", [])
+    filings = []
+    for f in data.get("hits", []):
+        link = f.get("linkToFilingDetails", "")
+        if "/Archives/" not in link:
+            continue
+        acc_path = link.split("/Archives/")[-1]
+        xml_url = "https://www.sec.gov/Archives/" + acc_path.replace("-index.htm", ".xml")
+        html_url = "https://www.sec.gov/Archives/" + acc_path
+        filings.append({
+            "company": f.get("displayNames", ["?"])[0],
+            "filedAt": f.get("filedAt", ""),
+            "accession": acc_path,
+            "xml_url": xml_url,
+            "html_url": html_url
+        })
+    print(f"✅ Found {len(filings)} filings.")
+    return filings
 
-def parse_form4_xml(url):
+
+def parse_form4(xml_url):
+    """Analyse un Form 4 XML pour extraire les achats (> 100 k $)."""
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code == 404 and url.endswith(".xml"):
-            url = url.replace(".xml", ".txt")
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code == 404 and url.endswith(".txt"):
-            url = url.replace(".txt", ".htm")
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200:
-            print(f"Could not fetch filing at {url}, status {resp.status_code}")
+        r = requests.get(xml_url, headers=HEADERS, timeout=15)
+        if r.status_code != 200:
             return None
+        root = ET.fromstring(r.content)
 
-        if url.endswith(".xml") or url.endswith(".txt"):
-            tree = ET.fromstring(resp.content)
-            issuer = tree.findtext(".//issuerName") or "N/A"
-            insider = tree.findtext(".//rptOwnerName") or "N/A"
-            trans_type = tree.findtext(".//transactionCode")
-            shares = float(tree.findtext(".//transactionShares/value") or 0)
-            price = float(tree.findtext(".//transactionPricePerShare/value") or 0)
-            total = shares * price
-            return {
-                "issuer": issuer,
-                "insider": insider,
-                "type": trans_type,
-                "amount": total,
-                "link": url
-            }
-        else:
-            soup = BeautifulSoup(resp.text, "html.parser")
-            text = soup.get_text()
-            if "P" in text and "$" in text:
-                return {"issuer": "N/A", "insider": "N/A", "type": "P", "amount": 0, "link": url}
-    except Exception as e:
-        print(f"Error parsing {url}: {e}")
-    return None
+        issuer = root.findtext(".//issuerName") or "Unknown issuer"
+        insider = root.findtext(".//reportingOwnerName") or "Unknown insider"
 
-def main():
-    print(f"Starting screener at {datetime.datetime.now().isoformat()}")
-    filings = fetch_form4_filings()
-    print(f"Fetched {len(filings)} filings")
+        total_value = 0.0
+        for t in root.findall(".//nonDerivativeTransaction"):
+            code = t.findtext(".//transactionAcquiredDisposedCode/value")
+            if code != "A":
+                continue  # skip sales/disposals
+            price = t.findtext(".//transactionPricePerShare/value")
+            shares = t.findtext(".//transactionShares/value")
+            if price and shares:
+                try:
+                    total_value += float(price) * float(shares)
+                except ValueError:
+                    continue
 
-    matches = []
-    for f in filings:
-        try:
-            if "linkToHtml" not in f:
-                continue
-            html_link = f["linkToHtml"]
-            if not html_link.startswith("https://www.sec.gov"):
-                html_link = "https://www.sec.gov" + html_link
-            xml_url = html_link.replace("-index.htm", ".xml")
-            parsed = parse_form4_xml(xml_url)
-            if parsed and parsed["type"] == "P" and parsed["amount"] > 100000:
-                matches.append(parsed)
-        except Exception as e:
-            print(f"Skipping malformed filing: {e}")
+        return {"issuer": issuer, "insider": insider, "value": total_value}
+    except Exception:
+        return None
 
-    print(f"Matches found: {len(matches)}")
 
-    # --- Generate PDF ---
+def generate_pdf(results):
+    """Génère le rapport PDF des achats détectés."""
     doc = SimpleDocTemplate("Form4_Report.pdf", pagesize=letter)
     styles = getSampleStyleSheet()
-    Story = [Paragraph("📈 Form 4 – Achats insiders > 100 000 $", styles["Title"]), Spacer(1, 0.25 * inch)]
+    story = [
+        Paragraph("📈 Daily Insider Buying Screener — Form 4", styles["Title"]),
+        Spacer(1, 0.3 * inch)
+    ]
 
-    if not matches:
-        Story.append(Paragraph("Aucun achat insider > 100 000 $ trouvé aujourd'hui.", styles["Normal"]))
+    for r in results:
+        story.append(Paragraph(f"<b>{r['issuer']}</b> — {r['insider']}", styles["Normal"]))
+        story.append(Paragraph(f"Valeur d’achat : <b>${r['value']:,.0f}</b>", styles["Normal"]))
+        story.append(Paragraph(
+            f"<a href='{r['html_url']}'>🔗 Form 4 (HTML)</a> — "
+            f"<a href='{r['xml_url']}'>XML</a>",
+            styles["Normal"]
+        ))
+        story.append(Spacer(1, 0.25 * inch))
+
+    doc.build(story)
+    print("✅ PDF generated: Form4_Report.pdf")
+
+
+def main():
+    print(f"🚀 Starting Form 4 screener at {datetime.utcnow().isoformat()}")
+    filings = fetch_form4_filings(limit=60)
+    results = []
+
+    for f in filings:
+        info = parse_form4(f["xml_url"])
+        if info and info["value"] > 100000:
+            info.update({"html_url": f["html_url"], "xml_url": f["xml_url"]})
+            results.append(info)
+
+    print(f"✅ Matching purchases > $100 000 : {len(results)} found.")
+
+    if results:
+        generate_pdf(results)
+        with open("email_summary.txt", "w") as f:
+            for r in results:
+                f.write(
+                    f"{r['issuer']} — {r['insider']} — ${r['value']:,.0f}\n"
+                    f"{r['html_url']}\n\n"
+                )
+        print("✅ Summary written to email_summary.txt")
     else:
-        for m in matches:
-            ptext = (
-                f"<b>{m['issuer']}</b> — {m['insider']}<br/>"
-                f"Achat: ${m['amount']:,.0f}<br/>"
-                f"<a href='{m['link']}'>Lien vers le Form 4</a>"
-            )
-            Story.append(Paragraph(ptext, styles["Normal"]))
-            Story.append(Spacer(1, 0.2 * inch))
+        print("ℹ️ No matching purchases found today.")
 
-    doc.build(Story)
-
-    # --- Write summary for email ---
-    with open("email_summary.txt", "w") as f:
-        if matches:
-            for m in matches:
-                f.write(f"{m['issuer']} — {m['insider']} — ${m['amount']:,.0f}\n{m['link']}\n\n")
-        else:
-            f.write("Aucun achat insider > 100 000 $ trouvé aujourd'hui.\n")
-
-    print("✅ Done.")
 
 if __name__ == "__main__":
     main()
