@@ -9,7 +9,7 @@ from reportlab.lib.units import inch
 
 # ---------- CONFIG ----------
 OUTPUT_FILE = "Form4_Report.pdf"
-MIN_PURCHASE_USD = 100_000
+MIN_PURCHASE_USD = 400_000
 USER_AGENT = {"User-Agent": "Form4Screener/1.0 (contact: your_email@example.com)"}
 SUMMARY_FILE = "email_summary.txt"
 # ----------------------------
@@ -72,7 +72,7 @@ def generate_pdf(buy_filings):
     """Crée le rapport PDF"""
     doc = SimpleDocTemplate(OUTPUT_FILE, pagesize=letter)
     styles = getSampleStyleSheet()
-    story = [Paragraph("📈 SEC Form 4 Insider Buys > 100k$", styles["Title"]), Spacer(1, 0.2*inch)]
+    story = [Paragraph("📈 SEC Form 4 Insider Buys > 400k$", styles["Title"]), Spacer(1, 0.2*inch)]
     story.append(Paragraph(f"Date du rapport : {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", styles["Normal"]))
     story.append(Spacer(1, 0.3*inch))
 
