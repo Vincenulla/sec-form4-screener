@@ -1,123 +1,128 @@
 import requests
-import xml.etree.ElementTree as ET
-from datetime import datetime
+import re
+import os
+from datetime import datetime, timedelta
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-import os
+from reportlab.lib.units import inch
 
-# ⚠️ Mets ici ton adresse e-mail (obligatoire pour les requêtes SEC)
-USER_AGENT = "Form4Screener/1.0 (ton.email@exemple.com)"
-HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
+# ---------- CONFIG ----------
+OUTPUT_FILE = "Form4_Report.pdf"
+MIN_PURCHASE_USD = 100_000
+USER_AGENT = {"User-Agent": "Form4Screener/1.0 (contact: your_email@example.com)"}
+SUMMARY_FILE = "email_summary.txt"
+# ----------------------------
 
-def fetch_form4_filings(limit=50):
-    """Récupère les derniers dépôts Form 4 via l’API EDGAR Next."""
-    print("🔎 Fetching recent Form 4 filings from SEC EDGAR Next…")
-    url = (
-        "https://efts.sec.gov/LATEST/search-index"
-        f"?keys=formType%3A%224%22&category=custom&forms=4"
-        f"&start=0&count={limit}&sortField=filedAt&sortOrder=desc"
-    )
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    filings = []
-    for f in data.get("hits", []):
-        link = f.get("linkToFilingDetails", "")
-        if "/Archives/" not in link:
+def download_daily_index():
+    """Télécharge l'index journalier le plus récent disponible"""
+    today = datetime.utcnow()
+    for i in range(3):  # essaie les 3 derniers jours
+        date = today - timedelta(days=i)
+        year, qtr = date.year, (date.month - 1)//3 + 1
+        url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{qtr}/company.{date.strftime('%Y%m%d')}.idx"
+        print(f"Tentative : {url}")
+        resp = requests.get(url, headers=USER_AGENT)
+        if resp.status_code == 200:
+            print("Index trouvé :", url)
+            return resp.text
+    raise RuntimeError("Impossible de récupérer l'index SEC des 3 derniers jours.")
+
+def extract_form4_lines(index_text):
+    """Extrait les lignes Form 4 depuis le texte brut"""
+    lines = []
+    capture = False
+    for line in index_text.splitlines():
+        if "-----" in line:
+            capture = True
             continue
-        acc_path = link.split("/Archives/")[-1]
-        xml_url = "https://www.sec.gov/Archives/" + acc_path.replace("-index.htm", ".xml")
-        html_url = "https://www.sec.gov/Archives/" + acc_path
-        filings.append({
-            "company": f.get("displayNames", ["?"])[0],
-            "filedAt": f.get("filedAt", ""),
-            "accession": acc_path,
-            "xml_url": xml_url,
-            "html_url": html_url
-        })
-    print(f"✅ Found {len(filings)} filings.")
-    return filings
+        if capture and re.search(r"\b4\b", line):
+            lines.append(line)
+    return lines
 
-
-def parse_form4(xml_url):
-    """Analyse un Form 4 XML pour extraire les achats (> 100 k $)."""
+def parse_index_line(line):
+    """Parse une ligne d'index"""
     try:
-        r = requests.get(xml_url, headers=HEADERS, timeout=15)
-        if r.status_code != 200:
-            return None
-        root = ET.fromstring(r.content)
-
-        issuer = root.findtext(".//issuerName") or "Unknown issuer"
-        insider = root.findtext(".//reportingOwnerName") or "Unknown insider"
-
-        total_value = 0.0
-        for t in root.findall(".//nonDerivativeTransaction"):
-            code = t.findtext(".//transactionAcquiredDisposedCode/value")
-            if code != "A":
-                continue  # skip sales/disposals
-            price = t.findtext(".//transactionPricePerShare/value")
-            shares = t.findtext(".//transactionShares/value")
-            if price and shares:
-                try:
-                    total_value += float(price) * float(shares)
-                except ValueError:
-                    continue
-
-        return {"issuer": issuer, "insider": insider, "value": total_value}
+        parts = re.split(r"\s{2,}", line.strip())
+        company = parts[0]
+        form_type = parts[1]
+        cik = parts[2]
+        filename = parts[-1]
+        filing_url = f"https://www.sec.gov/Archives/{filename}"
+        return {"company": company, "cik": cik, "url": filing_url}
     except Exception:
         return None
 
+def extract_buy_transactions(filing_text):
+    """Analyse simple du contenu pour détecter des achats > seuil"""
+    text = filing_text.lower()
+    if "acquisition" not in text and "purchase" not in text:
+        return False
+    matches = re.findall(r"\$?([\d,]+)", text)
+    for m in matches:
+        try:
+            val = float(m.replace(",", ""))
+            if val >= MIN_PURCHASE_USD:
+                return True
+        except:
+            pass
+    return False
 
-def generate_pdf(results):
-    """Génère le rapport PDF des achats détectés."""
-    doc = SimpleDocTemplate("Form4_Report.pdf", pagesize=letter)
+def generate_pdf(buy_filings):
+    """Crée le rapport PDF"""
+    doc = SimpleDocTemplate(OUTPUT_FILE, pagesize=letter)
     styles = getSampleStyleSheet()
-    story = [
-        Paragraph("📈 Daily Insider Buying Screener — Form 4", styles["Title"]),
-        Spacer(1, 0.3 * inch)
-    ]
+    story = [Paragraph("📈 SEC Form 4 Insider Buys > 100k$", styles["Title"]), Spacer(1, 0.2*inch)]
+    story.append(Paragraph(f"Date du rapport : {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}", styles["Normal"]))
+    story.append(Spacer(1, 0.3*inch))
 
-    for r in results:
-        story.append(Paragraph(f"<b>{r['issuer']}</b> — {r['insider']}", styles["Normal"]))
-        story.append(Paragraph(f"Valeur d’achat : <b>${r['value']:,.0f}</b>", styles["Normal"]))
-        story.append(Paragraph(
-            f"<a href='{r['html_url']}'>🔗 Form 4 (HTML)</a> — "
-            f"<a href='{r['xml_url']}'>XML</a>",
-            styles["Normal"]
-        ))
-        story.append(Spacer(1, 0.25 * inch))
+    if not buy_filings:
+        story.append(Paragraph("Aucun achat significatif trouvé aujourd'hui.", styles["Normal"]))
+    else:
+        for f in buy_filings:
+            story.append(Paragraph(f"<b>{f['company']}</b> (CIK {f['cik']})", styles["Heading3"]))
+            story.append(Paragraph(f"<a href='{f['url']}'>{f['url']}</a>", styles["Normal"]))
+            story.append(Spacer(1, 0.2*inch))
 
     doc.build(story)
-    print("✅ PDF generated: Form4_Report.pdf")
+    print(f"✅ Rapport PDF généré : {OUTPUT_FILE}")
 
+def write_summary(buy_filings):
+    """Crée un résumé texte pour le corps de l'email"""
+    lines = []
+    lines.append("📊 Résumé du jour : Achats Form 4 > 100k$")
+    lines.append(f"Date du rapport : {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append("----------------------------------------------------")
+    if not buy_filings:
+        lines.append("Aucun achat insider significatif trouvé aujourd'hui.")
+    else:
+        for f in buy_filings:
+            lines.append(f"- {f['company']} (CIK {f['cik']}) → {f['url']}")
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    print("📝 Résumé email généré :", SUMMARY_FILE)
 
 def main():
-    print(f"🚀 Starting Form 4 screener at {datetime.utcnow().isoformat()}")
-    filings = fetch_form4_filings(limit=60)
-    results = []
+    print("Téléchargement de l'index journalier SEC...")
+    index_text = download_daily_index()
+    lines = extract_form4_lines(index_text)
+    print(f"{len(lines)} Form 4 trouvés dans l'index.")
 
-    for f in filings:
-        info = parse_form4(f["xml_url"])
-        if info and info["value"] > 100000:
-            info.update({"html_url": f["html_url"], "xml_url": f["xml_url"]})
-            results.append(info)
+    filings = []
+    for line in lines[:50]:
+        info = parse_index_line(line)
+        if not info:
+            continue
+        try:
+            filing_resp = requests.get(info["url"], headers=USER_AGENT)
+            if filing_resp.status_code == 200 and extract_buy_transactions(filing_resp.text):
+                filings.append(info)
+        except Exception as e:
+            print(f"Erreur {info['company']}: {e}")
 
-    print(f"✅ Matching purchases > $100 000 : {len(results)} found.")
-
-    if results:
-        generate_pdf(results)
-        with open("email_summary.txt", "w") as f:
-            for r in results:
-                f.write(
-                    f"{r['issuer']} — {r['insider']} — ${r['value']:,.0f}\n"
-                    f"{r['html_url']}\n\n"
-                )
-        print("✅ Summary written to email_summary.txt")
-    else:
-        print("ℹ️ No matching purchases found today.")
-
+    print(f"{len(filings)} achats significatifs trouvés.")
+    generate_pdf(filings)
+    write_summary(filings)
 
 if __name__ == "__main__":
     main()
